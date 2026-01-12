@@ -1,0 +1,25 @@
+version: '3.8'
+
+services:
+  cuda-samples:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: cuda-samples:latest
+    container_name: cuda-samples-benchmark
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    volumes:
+      # Mount output directory for benchmark results
+      - ./benchmark_results:/cuda-samples/benchmark_results
+    stdin_open: true
+    tty: true
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

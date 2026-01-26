@@ -27,11 +27,36 @@ USERNAME=$(whoami)
 if [[ "$(docker images -q $IMAGE_NAME 2> /dev/null)" == "" ]] || [[ "$REBUILD" == true ]]; then
     echo "Building Docker image from $SCRIPT_DIR/Dockerfile..."
     echo "Using UID=$USER_ID, GID=$GROUP_ID, USERNAME=$USERNAME"
-    docker build -t $IMAGE_NAME \
-        --build-arg USER_ID=$USER_ID \
-        --build-arg GROUP_ID=$GROUP_ID \
-        --build-arg USERNAME=$USERNAME \
-        -f "$SCRIPT_DIR/Dockerfile" "$SCRIPT_DIR"
+    
+    # Try to build with retries for rate limit errors
+    MAX_RETRIES=3
+    RETRY_DELAY=10
+    for i in $(seq 1 $MAX_RETRIES); do
+        echo "Build attempt $i of $MAX_RETRIES..."
+        if docker build -t $IMAGE_NAME \
+            --build-arg USER_ID=$USER_ID \
+            --build-arg GROUP_ID=$GROUP_ID \
+            --build-arg USERNAME=$USERNAME \
+            -f "$SCRIPT_DIR/Dockerfile" "$SCRIPT_DIR"; then
+            echo "Build successful!"
+            break
+        else
+            if [ $i -lt $MAX_RETRIES ]; then
+                echo "Build failed. Waiting ${RETRY_DELAY} seconds before retry..."
+                sleep $RETRY_DELAY
+                RETRY_DELAY=$((RETRY_DELAY * 2))  # Exponential backoff
+            else
+                echo "Build failed after $MAX_RETRIES attempts."
+                echo ""
+                echo "This is likely due to Docker Hub rate limiting."
+                echo "Possible solutions:"
+                echo "  1. Wait a few minutes and try again"
+                echo "  2. Log in to Docker Hub: docker login"
+                echo "  3. Use a mirror or different registry"
+                exit 1
+            fi
+        fi
+    done
 else
     echo "Using existing Docker image (use --rebuild to force rebuild)"
 fi

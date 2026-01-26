@@ -1,3 +1,4 @@
+
 # CUDA Samples Docker Environment for Benchmarking
 # Based on NVIDIA CUDA runtime with development tools
 # Using CUDA 13.0 as required by cuda-samples
@@ -6,9 +7,28 @@ FROM nvidia/cuda:13.0.0-devel-ubuntu22.04
 
 # Avoid prompts from apt
 ENV DEBIAN_FRONTEND=noninteractive
+# If your build env has restrictive /tmp, redirect temp usage
+ENV TMPDIR=/var/tmp
+
+# Ensure /tmp exists and is correctly writable
+RUN mkdir -p /tmp && chmod 1777 /tmp
+
+# Base prerequisites for apt, TLS, and gnupg
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates gnupg dirmngr apt-transport-https curl \
+ && rm -rf /var/lib/apt/lists/*
+
+# (Optional) Re-declare NVIDIA CUDA repo with keyring if `/tmp` errors persist
+# RUN set -eux; \
+#     mkdir -p /etc/apt/keyrings; \
+#     curl -fsSL https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/3bf863cc.pub \
+#       | gpg --dearmor -o /etc/apt/keyrings/cuda-keyring.gpg; \
+#     echo "deb [signed-by=/etc/apt/keyrings/cuda-keyring.gpg arch=amd64] https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/ /" \
+#       > /etc/apt/sources.list.d/cuda.list; \
+#     apt-get update
 
 # Install dependencies
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     cmake \
     build-essential \
     git \
@@ -33,7 +53,7 @@ RUN apt-get update && apt-get install -y \
     mesa-common-dev \
     wget \
     vim \
-    && rm -rf /var/lib/apt/lists/*
+ && rm -rf /var/lib/apt/lists/*
 
 # Create glut.pc for pkg-config (freeglut3-dev doesn't provide it)
 RUN mkdir -p /usr/lib/pkgconfig && \
@@ -67,8 +87,5 @@ RUN chown -R ${USERNAME}:${USERNAME} /cuda-samples
 # Switch to non-root user
 USER ${USERNAME}
 
-# Note: Source code will be mounted from host at runtime
-# This allows for easy modifications without rebuilding the image
-
-# Set the default command to bash
+# Default command
 CMD ["/bin/bash"]

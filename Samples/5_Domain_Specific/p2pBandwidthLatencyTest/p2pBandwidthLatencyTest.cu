@@ -29,6 +29,7 @@
 #include <helper_cuda.h>
 #include <helper_timer.h>
 #include <vector>
+#include <algorithm>
 
 using namespace std;
 
@@ -443,6 +444,167 @@ void outputBidirectionalBandwidthMatrix(int numElems, int numGPUs, bool p2p)
     cudaCheckError();
 }
 
+void outputIterativeP2PTest(int numGPUs, bool p2p)
+{
+    if (numGPUs < 2) {
+        printf("Iterative P2P test requires at least 2 GPUs. Skipping.\n");
+        return;
+    }
+
+    int                  repeat = 1000;
+    int                  gpu0   = 0;
+    int                  gpu1   = 1;
+    volatile int        *flag   = NULL;
+    vector<int *>        buffers(2);
+    vector<cudaStream_t> stream(2);
+    vector<cudaEvent_t>  start(2);
+    vector<cudaEvent_t>  stop(2);
+
+    // Data sizes to test: 1MB, 10MB, 100MB, 1000MB
+    vector<int> dataSizesMB = {1, 10, 100, 1000};
+    vector<int> numElemsArray;
+    for (int sizeMB : dataSizesMB) {
+        numElemsArray.push_back((sizeMB * 1024 * 1024) / sizeof(int));
+    }
+
+    cudaHostAlloc((void **)&flag, sizeof(*flag), cudaHostAllocPortable);
+    cudaCheckError();
+
+    // Allocate buffers on both GPUs (largest size)
+    int maxElems = numElemsArray[numElemsArray.size() - 1];
+    for (int d = 0; d < 2; d++) {
+        int gpu = (d == 0) ? gpu0 : gpu1;
+        cudaSetDevice(gpu);
+        cudaStreamCreateWithFlags(&stream[d], cudaStreamNonBlocking);
+        cudaMalloc(&buffers[d], maxElems * sizeof(int));
+        cudaMemset(buffers[d], 0, maxElems * sizeof(int));
+        cudaCheckError();
+        cudaEventCreate(&start[d]);
+        cudaCheckError();
+        cudaEventCreate(&stop[d]);
+        cudaCheckError();
+    }
+
+    printf("\nIterative P2P Test: P2P %s (GPU %d <-> GPU %d, %d iterations)\n", 
+           p2p ? "Enabled" : "Disabled", gpu0, gpu1, repeat);
+    
+    // Check P2P access
+    int access = 0;
+    if (p2p) {
+        cudaSetDevice(gpu0);
+        cudaDeviceCanAccessPeer(&access, gpu0, gpu1);
+        if (access) {
+            cudaDeviceEnablePeerAccess(gpu1, 0);
+            cudaCheckError();
+            cudaSetDevice(gpu1);
+            cudaDeviceEnablePeerAccess(gpu0, 0);
+            cudaCheckError();
+            cudaSetDevice(gpu0);
+            cudaCheckError();
+        }
+    }
+
+    // Statistics storage for each data size
+    vector<vector<double>> bandwidthStats(dataSizesMB.size());
+    vector<vector<double>> latencyStats(dataSizesMB.size());
+
+    // Test each data size
+    for (size_t idx = 0; idx < dataSizesMB.size(); idx++) {
+        int numElems = numElemsArray[idx];
+        
+        // Run iterations and collect measurements
+        for (int iter = 0; iter < repeat; iter++) {
+            cudaSetDevice(gpu0);
+            cudaStreamSynchronize(stream[0]);
+            cudaCheckError();
+
+            *flag = 0;
+            delay<<<1, 1, 0, stream[0]>>>(flag);
+            cudaCheckError();
+            cudaEventRecord(start[0], stream[0]);
+            cudaCheckError();
+
+            // GPU 0 -> GPU 1 transfer (single iteration)
+            performP2PCopy(buffers[1], gpu1, buffers[0], gpu0, numElems, 1, access, stream[0]);
+
+            cudaEventRecord(stop[0], stream[0]);
+            cudaCheckError();
+
+            *flag = 1;
+            cudaStreamSynchronize(stream[0]);
+            cudaCheckError();
+
+            float time_ms;
+            cudaEventElapsedTime(&time_ms, start[0], stop[0]);
+            
+            double gb = numElems * sizeof(int) / (double)1e9;
+            double time_s = time_ms / 1e3;
+            double bandwidth = gb / time_s;
+            double latency_us = time_ms * 1e3;
+
+            bandwidthStats[idx].push_back(bandwidth);
+            latencyStats[idx].push_back(latency_us);
+        }
+    }
+
+    // Calculate and print statistics
+    printf("Statistics by Data Size:\n");
+    printf("Data Size | Metric         | Min      | Max      | Median  \n");
+    printf("----------+----------------+----------+----------+---------\n");
+
+    for (size_t idx = 0; idx < dataSizesMB.size(); idx++) {
+        int sizeMB = dataSizesMB[idx];
+        
+        // Calculate bandwidth statistics
+        vector<double> bw = bandwidthStats[idx];
+        sort(bw.begin(), bw.end());
+        double bw_min = bw[0];
+        double bw_max = bw[bw.size() - 1];
+        double bw_median = bw.size() % 2 == 0 ? 
+            (bw[bw.size()/2 - 1] + bw[bw.size()/2]) / 2.0 : bw[bw.size()/2];
+
+        // Calculate latency statistics
+        vector<double> lat = latencyStats[idx];
+        sort(lat.begin(), lat.end());
+        double lat_min = lat[0];
+        double lat_max = lat[lat.size() - 1];
+        double lat_median = lat.size() % 2 == 0 ? 
+            (lat[lat.size()/2 - 1] + lat[lat.size()/2]) / 2.0 : lat[lat.size()/2];
+
+        // Print statistics for this data size
+        printf("%-7dMB | Bandwidth GB/s | %8.2f | %8.2f | %8.2f\n",
+               sizeMB, bw_min, bw_max, bw_median);
+        printf("          | Time μs        | %8.2f | %8.2f | %8.2f\n",
+               lat_min, lat_max, lat_median);
+        printf("----------+----------------+----------+----------+---------\n");
+    }
+
+    // Cleanup
+    if (p2p && access) {
+        cudaSetDevice(gpu0);
+        cudaDeviceDisablePeerAccess(gpu1);
+        cudaSetDevice(gpu1);
+        cudaDeviceDisablePeerAccess(gpu0);
+        cudaCheckError();
+    }
+
+    for (int d = 0; d < 2; d++) {
+        int gpu = (d == 0) ? gpu0 : gpu1;
+        cudaSetDevice(gpu);
+        cudaFree(buffers[d]);
+        cudaCheckError();
+        cudaEventDestroy(start[d]);
+        cudaCheckError();
+        cudaEventDestroy(stop[d]);
+        cudaCheckError();
+        cudaStreamDestroy(stream[d]);
+        cudaCheckError();
+    }
+
+    cudaFreeHost((void *)flag);
+    cudaCheckError();
+}
+
 void outputLatencyMatrix(int numGPUs, bool p2p, P2PDataTransfer p2p_method)
 {
     int                  repeat    = 100;
@@ -691,6 +853,10 @@ int main(int argc, char **argv)
         printf("P2P=Enabled Latency (P2P Reads) Matrix (us)\n");
         outputLatencyMatrix(numGPUs, true, p2p_method);
     }
+
+    // Run iterative P2P test with varying data sizes
+    outputIterativeP2PTest(numGPUs, false);
+    outputIterativeP2PTest(numGPUs, true);
 
     printf("\nNOTE: The CUDA Samples are not meant for performance measurements. "
            "Results may vary when GPU Boost is enabled.\n");
